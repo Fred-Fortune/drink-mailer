@@ -34,6 +34,14 @@ const DEPT_ALL_VALUE = "ALL";
 // ---- Types ----
 export type Recipient = { name: string; email: string; dept?: string; active?: boolean; note?: string };
 
+// 定義 API 回應類型
+interface ApiResponse {
+  ok?: boolean;
+  message?: string;
+  list?: Recipient[];
+  allDepts?: string[];
+}
+
 const FormSchema = z.object({
   vendor: z.string().min(1, "必填"),
   link: z.string().url("需要有效網址"),
@@ -78,7 +86,7 @@ export default function DrinkMailer() {
     try {
       const url = buildGetRecipientsUrl(APPS_SCRIPT_BASE, opts?.dept, opts?.keyword);
       const res = await fetch(url.toString());
-      const data = await res.json();
+      const data: ApiResponse = await res.json();
       const list: Recipient[] = data.list || [];
       setRecipients(list);
       setAllDepts(data.allDepts || []);
@@ -86,8 +94,9 @@ export default function DrinkMailer() {
       const nextSel: Record<string, boolean> = {};
       for (const r of list) if (r.email && r.active) nextSel[r.email] = true;
       setSelected(nextSel);
-    } catch (e: any) {
-      setMessage(e?.message ?? "讀取名單失敗");
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : "讀取名單失敗";
+      setMessage(errorMessage);
     } finally {
       setLoading(false);
     }
@@ -133,14 +142,15 @@ export default function DrinkMailer() {
         //headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fn: "sendmail", payload }),
       });
-      const data = await res.json();
+      const data: ApiResponse = await res.json();
       if (data?.ok) {
         setMessage(data.message || "寄送成功");
       } else {
         throw new Error(data?.message || "寄送失敗");
       }
-    } catch (e: any) {
-      setMessage(e?.message ?? "寄送失敗");
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : "寄送失敗";
+      setMessage(errorMessage);
     } finally {
       setSending(false);
     }
@@ -207,7 +217,7 @@ export default function DrinkMailer() {
 
             <div className="space-y-2">
               <Label>訂購截止 *</Label>
-              <DateTimePicker value={deadline} onChange={(d)=>setValue("deadline", d as any, { shouldValidate: true })} />
+              <DateTimePicker value={deadline} onChange={(d)=>setValue("deadline", d as Date, { shouldValidate: true })} />
               {errors.deadline && <p className="text-sm text-red-600">{errors.deadline.message as string}</p>}
             </div>
 
@@ -407,7 +417,7 @@ export function buildPayloadForTest(values: {vendor:string; link:string; deadlin
     // Test 6: payload 不應包含 pickup/location
     const payload = buildPayloadForTest({vendor:"V", link:"https://x.test", deadline:new Date(), note:"N"}, {"a@b.com":true}, true);
     console.assert(!("pickup" in payload) && !("location" in payload), "[Test6] payload should not contain pickup/location");
-  } catch (_) {
+  } catch {
     // 某些 SSR/非瀏覽器環境的 URL 限制可忽略
   }
 })();
