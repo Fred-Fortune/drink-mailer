@@ -116,45 +116,79 @@ export default function DrinkMailer() {
     setSelected(next);
   }
 
-  async function onSubmit(values: z.infer<typeof FormSchema>) {
-    if (!anyChecked) {
-      setMessage("請至少勾選一位收件人");
-      return;
+async function onSubmit(values: z.infer<typeof FormSchema>) {
+  if (!anyChecked) {
+    setMessage("請至少勾選一位收件人");
+    return;
+  }
+  
+  setSending(true);
+  setMessage("寄送中…");
+  
+  try {
+    // 獲取使用者 IP - 使用多個備選服務
+    let userIP = "unknown";
+    try {
+      // 嘗試第一個服務
+      const ipResponse = await fetch('https://api.ipify.org?format=json', {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' }
+      });
+      if (ipResponse.ok) {
+        const ipData = await ipResponse.json();
+        userIP = ipData.ip;
+      } else {
+        throw new Error('ipify failed');
+      }
+    } catch (ipError) {
+      console.warn('ipify 失敗，嘗試備選服務:', ipError);
+      try {
+        // 備選服務
+        const ipResponse2 = await fetch('https://httpbin.org/ip');
+        if (ipResponse2.ok) {
+          const ipData2 = await ipResponse2.json();
+          userIP = ipData2.origin.split(',')[0].trim(); // 取第一個 IP
+        }
+      } catch (ipError2) {
+        console.warn('所有 IP 服務都失敗:', ipError2);
+        userIP = "fetch-failed";
+      }
     }
+
     const cleanLink = (values.link || "")
       .replace(/[\u200B\uFEFF]/g, "")
       .replace(/\u3000/g, " ")
       .trim();
 
-    setSending(true);
-    setMessage("寄送中…");
-    try {
-      const payload = {
-        vendor: values.vendor,
-        link: cleanLink,
-        deadline: values.deadline?.toISOString?.(),
-        note: values.note || "",
-        emails: Object.keys(selected).filter((k) => selected[k]),
-        bccMode,
-      };
-      const res = await fetch(APPS_SCRIPT_BASE, {
-        method: "POST",
-        //headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fn: "sendmail", payload }),
-      });
-      const data: ApiResponse = await res.json();
-      if (data?.ok) {
-        setMessage(data.message || "寄送成功");
-      } else {
-        throw new Error(data?.message || "寄送失敗");
-      }
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : "寄送失敗";
-      setMessage(errorMessage);
-    } finally {
-      setSending(false);
+    const payload = {
+      vendor: values.vendor,
+      link: cleanLink,
+      deadline: values.deadline?.toISOString?.(),
+      note: values.note || "",
+      emails: Object.keys(selected).filter((k) => selected[k]),
+      bccMode,
+      senderIP: userIP,  // 加入 IP
+      timestamp: new Date().toISOString()
+    };
+    
+    const res = await fetch(APPS_SCRIPT_BASE, {
+      method: "POST",
+      body: JSON.stringify({ fn: "sendmail", payload }),
+    });
+    
+    const data: ApiResponse = await res.json();
+    if (data?.ok) {
+      setMessage(data.message || "寄送成功");
+    } else {
+      throw new Error(data?.message || "寄送失敗");
     }
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : "寄送失敗";
+    setMessage(errorMessage);
+  } finally {
+    setSending(false);
   }
+}
 
   return (
     <div className="container mx-auto p-6 space-y-6">
