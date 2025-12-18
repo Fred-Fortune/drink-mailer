@@ -19,6 +19,16 @@ import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import { Coffee as CalendarIcon, Send, Filter, CheckCircle2 } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 // ---- CONFIG ----
 // 將這個常數換成你部署好的 Google Apps Script Web App URL
@@ -60,6 +70,10 @@ export default function DrinkMailer() {
   const [sending, setSending] = useState(false);
   const [message, setMessage] = useState<string>("");
   const [bccMode, setBccMode] = useState(true);
+
+  // 確認視窗狀態
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [pendingValues, setPendingValues] = useState<z.infer<typeof FormSchema> | null>(null);
 
   const {
     register,
@@ -116,79 +130,87 @@ export default function DrinkMailer() {
     setSelected(next);
   }
 
-async function onSubmit(values: z.infer<typeof FormSchema>) {
-  if (!anyChecked) {
-    setMessage("請至少勾選一位收件人");
-    return;
-  }
-  
-  setSending(true);
-  setMessage("寄送中…");
-  
-  try {
-    // 獲取使用者 IP - 使用多個備選服務
-    let userIP = "unknown";
-    try {
-      // 嘗試第一個服務
-      const ipResponse = await fetch('https://api.ipify.org?format=json', {
-        method: 'GET',
-        headers: { 'Accept': 'application/json' }
-      });
-      if (ipResponse.ok) {
-        const ipData = await ipResponse.json();
-        userIP = ipData.ip;
-      } else {
-        throw new Error('ipify failed');
+
+
+  // 計算預計發送的部門統計
+  const deptSummary = useMemo(() => {
+    const counts: Record<string, number> = {};
+    let total = 0;
+    filtered.forEach((r) => {
+      if (selected[r.email]) {
+        const d = r.dept || "未分類";
+        counts[d] = (counts[d] || 0) + 1;
+        total++;
       }
-    } catch (ipError) {
-      console.warn('ipify 失敗，嘗試備選服務:', ipError);
+    });
+    return { text: Object.entries(counts).map(([d, c]) => `${d} ${c} 位`).join("、"), total };
+  }, [filtered, selected]);
+
+  function onSubmit(values: z.infer<typeof FormSchema>) {
+    if (!anyChecked) {
+      setMessage("請至少勾選一位收件人");
+      return;
+    }
+    setPendingValues(values);
+    setConfirmOpen(true);
+  }
+
+  async function handleConfirmSend() {
+    if (!pendingValues) return;
+    const values = pendingValues;
+    setConfirmOpen(false); // 關閉視窗，開始寄送
+
+    setSending(true);
+    setMessage("寄送中…");
+
+    try {
+      // 獲取使用者 IP - 改用自建 API (避免被廣告阻擋器攔截)
+      let userIP = "unknown";
       try {
-        // 備選服務
-        const ipResponse2 = await fetch('https://httpbin.org/ip');
-        if (ipResponse2.ok) {
-          const ipData2 = await ipResponse2.json();
-          userIP = ipData2.origin.split(',')[0].trim(); // 取第一個 IP
+        const ipResponse = await fetch('/api/get-ip');
+        if (ipResponse.ok) {
+          const ipData = await ipResponse.json();
+          userIP = ipData.ip || "unknown";
         }
-      } catch (ipError2) {
-        console.warn('所有 IP 服務都失敗:', ipError2);
+      } catch (ipError) {
+        console.warn('獲取 IP 失敗:', ipError);
         userIP = "fetch-failed";
       }
-    }
 
-    const cleanLink = (values.link || "")
-      .replace(/[\u200B\uFEFF]/g, "")
-      .replace(/\u3000/g, " ")
-      .trim();
+      const cleanLink = (values.link || "")
+        .replace(/[\u200B\uFEFF]/g, "")
+        .replace(/\u3000/g, " ")
+        .trim();
 
-    const payload = {
-      vendor: values.vendor,
-      link: cleanLink,
-      deadline: values.deadline?.toISOString?.(),
-      note: values.note || "",
-      emails: Object.keys(selected).filter((k) => selected[k]),
-      bccMode,
-      senderIP: userIP,  // 加入 IP
-      timestamp: new Date().toISOString()
-    };
-    
-    const res = await fetch(APPS_SCRIPT_BASE, {
-      method: "POST",
-      body: JSON.stringify({ fn: "sendmail", payload }),
-    });
-    
-    const data: ApiResponse = await res.json();
-    if (data?.ok) {
-      setMessage(data.message || "寄送成功");
-    } else {
-      throw new Error(data?.message || "寄送失敗");
+      const payload = {
+        vendor: values.vendor,
+        link: cleanLink,
+        deadline: values.deadline?.toISOString?.(),
+        note: values.note || "",
+        emails: Object.keys(selected).filter((k) => selected[k]),
+        bccMode,
+        senderIP: userIP,  // 加入 IP
+        timestamp: new Date().toISOString()
+      };
+
+      const res = await fetch(APPS_SCRIPT_BASE, {
+        method: "POST",
+        body: JSON.stringify({ fn: "sendmail", payload }),
+      });
+
+      const data: ApiResponse = await res.json();
+      if (data?.ok) {
+        setMessage(data.message || "寄送成功");
+      } else {
+        throw new Error(data?.message || "寄送失敗");
+      }
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : "寄送失敗";
+      setMessage(errorMessage);
+    } finally {
+      setSending(false);
     }
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : "寄送失敗";
-    setMessage(errorMessage);
-  } finally {
-    setSending(false);
   }
-}
 
   return (
     <div className="container mx-auto p-6 space-y-6">
@@ -222,8 +244,8 @@ async function onSubmit(values: z.infer<typeof FormSchema>) {
         </CardHeader>
         <CardContent className="space-y-2 text-sm text-muted-foreground">
           <ol className="list-decimal ml-5 space-y-1">
-            <li>先使用該帳號開團 帳號 : 0983176721 ； 
-                密碼 : 123456。</li>
+            <li>先使用該帳號開團 帳號 : 0983176721 ；
+              密碼 : 123456。</li>
             <li>貼上開團資訊，勾選收件人，一鍵寄出。</li>
           </ol>
         </CardContent>
@@ -251,7 +273,7 @@ async function onSubmit(values: z.infer<typeof FormSchema>) {
 
             <div className="space-y-2">
               <Label>訂購截止 *</Label>
-              <DateTimePicker value={deadline} onChange={(d)=>setValue("deadline", d as Date, { shouldValidate: true })} />
+              <DateTimePicker value={deadline} onChange={(d) => setValue("deadline", d as Date, { shouldValidate: true })} />
               {errors.deadline && <p className="text-sm text-red-600">{errors.deadline.message as string}</p>}
             </div>
 
@@ -267,7 +289,7 @@ async function onSubmit(values: z.infer<typeof FormSchema>) {
           <div className="flex items-end gap-3 flex-wrap">
             <div className="w-56">
               <Label>部門篩選</Label>
-              <Select value={dept} onValueChange={(v)=> setDept(v)}>
+              <Select value={dept} onValueChange={(v) => setDept(v)}>
                 <SelectTrigger>
                   {/* 若 value 為 DEPT_ALL_VALUE，仍會顯示對應的 SelectItem 文字 */}
                   <SelectValue placeholder="全部部門" />
@@ -275,7 +297,7 @@ async function onSubmit(values: z.infer<typeof FormSchema>) {
                 <SelectContent>
                   {/* FIX: 不再使用空字串作為 value，避免錯誤 */}
                   <SelectItem value={DEPT_ALL_VALUE}>全部部門</SelectItem>
-                  {allDepts.map((d)=> (
+                  {allDepts.map((d) => (
                     <SelectItem key={d} value={d}>{d}</SelectItem>
                   ))}
                 </SelectContent>
@@ -283,14 +305,14 @@ async function onSubmit(values: z.infer<typeof FormSchema>) {
             </div>
             <div className="w-64">
               <Label>關鍵字</Label>
-              <Input value={keyword} onChange={(e)=> setKeyword(e.target.value)} placeholder="姓名 / Email / 部門" />
+              <Input value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="姓名 / Email / 部門" />
             </div>
-            <Button variant="secondary" onClick={()=> fetchRecipients({ dept, keyword })}>
+            <Button variant="secondary" onClick={() => fetchRecipients({ dept, keyword })}>
               <Filter className="mr-2 h-4 w-4" />套用篩選
             </Button>
             <div className="ml-auto flex gap-2">
-              <Button variant="secondary" onClick={()=> toggleAll(true)}>全選</Button>
-              <Button variant="secondary" onClick={()=> toggleAll(false)}>全不選</Button>
+              <Button variant="secondary" onClick={() => toggleAll(true)}>全選</Button>
+              <Button variant="secondary" onClick={() => toggleAll(false)}>全不選</Button>
             </div>
           </div>
 
@@ -314,7 +336,7 @@ async function onSubmit(values: z.infer<typeof FormSchema>) {
                       <td className="py-2">
                         <Checkbox
                           checked={!!selected[r.email]}
-                          onCheckedChange={(v)=> setSelected((s)=> ({ ...s, [r.email]: !!v }))}
+                          onCheckedChange={(v) => setSelected((s) => ({ ...s, [r.email]: !!v }))}
                           aria-label={`select ${r.email}`}
                         />
                       </td>
@@ -331,7 +353,7 @@ async function onSubmit(values: z.infer<typeof FormSchema>) {
 
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2">
-              <Checkbox id="bcc" checked={bccMode} onCheckedChange={(v)=> setBccMode(!!v)} />
+              <Checkbox id="bcc" checked={bccMode} onCheckedChange={(v) => setBccMode(!!v)} />
               <Label htmlFor="bcc">以 BCC 群發（建議）</Label>
             </div>
             <div className="text-sm text-muted-foreground">避免露出所有名單；取消則所有人放在 To。</div>
@@ -349,36 +371,56 @@ async function onSubmit(values: z.infer<typeof FormSchema>) {
       </Card>
 
       {/* === Footer / 版權標記 === */}
-  <footer className="pt-6 border-t text-center text-xs text-muted-foreground">
-    © {new Date().getFullYear()} 華城 資訊中心-李承翰 · All Rights Reserved
-  </footer>
+      <footer className="pt-6 border-t text-center text-xs text-muted-foreground">
+        © {new Date().getFullYear()} 華城 資訊中心-李承翰 · All Rights Reserved
+      </footer>
 
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>確認寄送</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <div>即將發送給 <b>{deptSummary.total}</b> 位收件人：</div>
+                <div className="p-2 bg-slate-100 rounded text-slate-700 text-sm">
+                  {deptSummary.text}
+                </div>
+                <div>確定要執行嗎？</div>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmSend}>確認寄出</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
 
 // ---- DateTime Picker (shadcn composition) ----
-function DateTimePicker({ value, onChange }: { value?: Date; onChange: (d?: Date)=>void }) {
+function DateTimePicker({ value, onChange }: { value?: Date; onChange: (d?: Date) => void }) {
   const [open, setOpen] = useState(false);
-  const dateStr = value ? `${value.getFullYear()}/${String(value.getMonth()+1).padStart(2,"0")}/${String(value.getDate()).padStart(2,"0")} ${String(value.getHours()).padStart(2,"0")}:${String(value.getMinutes()).padStart(2,"0")}` : "選擇日期時間";
+  const dateStr = value ? `${value.getFullYear()}/${String(value.getMonth() + 1).padStart(2, "0")}/${String(value.getDate()).padStart(2, "0")} ${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}` : "選擇日期時間";
   const [date, setDate] = useState<Date | undefined>(value);
-  const [time, setTime] = useState<string>(value ? `${String(value.getHours()).padStart(2,"0")}:${String(value.getMinutes()).padStart(2,"0")}` : "12:00");
+  const [time, setTime] = useState<string>(value ? `${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}` : "12:00");
 
-  useEffect(()=>{ setDate(value); if (value) setTime(`${String(value.getHours()).padStart(2,"0")}:${String(value.getMinutes()).padStart(2,"0")}`); }, [value]);
+  useEffect(() => { setDate(value); if (value) setTime(`${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}`); }, [value]);
 
-  function commit(d?: Date, t?: string){
+  function commit(d?: Date, t?: string) {
     const base = d ?? date;
     const tm = (t ?? time).split(":");
     if (!base || tm.length !== 2) return onChange(undefined);
     const out = new Date(base);
-    out.setHours(Number(tm[0]||0), Number(tm[1]||0), 0, 0);
+    out.setHours(Number(tm[0] || 0), Number(tm[1] || 0), 0, 0);
     onChange(out);
   }
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button variant="outline" className={cn("w-full justify-start text-left font-normal", !value && "text-muted-foreground")}> 
+        <Button variant="outline" className={cn("w-full justify-start text-left font-normal", !value && "text-muted-foreground")}>
           <CalendarIcon className="mr-2 h-4 w-4" /> {dateStr}
         </Button>
       </PopoverTrigger>
@@ -387,13 +429,13 @@ function DateTimePicker({ value, onChange }: { value?: Date; onChange: (d?: Date
           <Calendar
             mode="single"
             selected={date}
-            onSelect={(d)=> { setDate(d); commit(d, undefined); }}
+            onSelect={(d) => { setDate(d); commit(d, undefined); }}
             initialFocus
           />
           <div className="flex items-center gap-2">
-            <Input type="time" value={time} onChange={(e)=> { setTime(e.target.value); commit(undefined, e.target.value); }} />
-            <Button size="sm" onClick={()=> setOpen(false)}>
-              <CheckCircle2 className="mr-1 h-4 w-4"/> 確定
+            <Input type="time" value={time} onChange={(e) => { setTime(e.target.value); commit(undefined, e.target.value); }} />
+            <Button size="sm" onClick={() => setOpen(false)}>
+              <CheckCircle2 className="mr-1 h-4 w-4" /> 確定
             </Button>
           </div>
         </div>
@@ -416,18 +458,18 @@ export function buildGetRecipientsUrl(base: string, dept?: string, keyword?: str
   return url;
 }
 
-export function buildPayloadForTest(values: {vendor:string; link:string; deadline:Date; note?:string}, selected: Record<string, boolean>, bccMode:boolean){
+export function buildPayloadForTest(values: { vendor: string; link: string; deadline: Date; note?: string }, selected: Record<string, boolean>, bccMode: boolean) {
   return {
     vendor: values.vendor,
     link: values.link,
     deadline: values.deadline?.toISOString?.(),
     note: values.note || "",
-    emails: Object.keys(selected).filter(k=> selected[k]),
+    emails: Object.keys(selected).filter(k => selected[k]),
     bccMode,
   };
 }
 
-(function runDevTests(){
+(function runDevTests() {
   try {
     // Test 1: ALL 不應帶出 dept 參數
     const u1 = buildGetRecipientsUrl(APPS_SCRIPT_BASE, DEPT_ALL_VALUE, "");
@@ -449,7 +491,7 @@ export function buildPayloadForTest(values: {vendor:string; link:string; deadlin
     //console.assert(DEPT_ALL_VALUE !== "", "[Test5] DEPT_ALL_VALUE must not be empty");
 
     // Test 6: payload 不應包含 pickup/location
-    const payload = buildPayloadForTest({vendor:"V", link:"https://x.test", deadline:new Date(), note:"N"}, {"a@b.com":true}, true);
+    const payload = buildPayloadForTest({ vendor: "V", link: "https://x.test", deadline: new Date(), note: "N" }, { "a@b.com": true }, true);
     console.assert(!("pickup" in payload) && !("location" in payload), "[Test6] payload should not contain pickup/location");
   } catch {
     // 某些 SSR/非瀏覽器環境的 URL 限制可忽略
