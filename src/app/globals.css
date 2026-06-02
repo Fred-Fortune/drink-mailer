@@ -1,6 +1,9 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* 排除 Visual Studio 的 .vs 資料夾，避免 Tailwind 掃到被鎖住的 .vsidx 檔造成 Turbopack panic (os error 32) */
+@source not "../../.vs";
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {

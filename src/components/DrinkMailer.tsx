@@ -37,12 +37,15 @@ const APPS_SCRIPT_BASE = "https://script.google.com/macros/s/AKfycbwmVzoPJVAQVDg
 // 部門下拉選單用的『全部部門』值（不可為空字串，避免 shadcn/radix Select 報錯）
 const DEPT_ALL_VALUE = "ALL";
 
+// 「今日飲料負責人」未指定時的 Select 值（同樣不可為空字串）
+const MANAGER_NONE_VALUE = "__NONE__";
+
 // 後端 API 規格：
 // GET  `${APPS_SCRIPT_BASE}?fn=getRecipients&dept=xxx&keyword=yyy`
 // POST `${APPS_SCRIPT_BASE}`  body: { fn:'sendMail', payload: {...} }
 
 // ---- Types ----
-export type Recipient = { name: string; email: string; dept?: string; active?: boolean; note?: string };
+export type Recipient = { name: string; email: string; dept?: string; active?: boolean; note?: string; phone?: string };
 
 // 定義 API 回應類型
 interface ApiResponse {
@@ -71,6 +74,10 @@ export default function DrinkMailer() {
   const [message, setMessage] = useState<string>("");
   const [bccMode, setBccMode] = useState(true);
 
+  // 今日飲料負責人：用「未經篩選的完整名單」當下拉來源，以 email 當唯一鍵
+  const [managerPool, setManagerPool] = useState<Recipient[]>([]);
+  const [managerEmail, setManagerEmail] = useState<string>("");
+
   // 確認視窗狀態
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingValues, setPendingValues] = useState<z.infer<typeof FormSchema> | null>(null);
@@ -93,8 +100,20 @@ export default function DrinkMailer() {
 
   const deadline = watch("deadline");
 
+  // 只列出「有填電話」的人，沒有電話就不能被選為負責人
+  const managerOptions = useMemo(
+    () => managerPool.filter((r) => (r.phone || "").trim() !== ""),
+    [managerPool]
+  );
+
+  // 依選到的 email 找出負責人（含電話）
+  const manager = useMemo(
+    () => managerOptions.find((r) => r.email === managerEmail),
+    [managerOptions, managerEmail]
+  );
+
   // Fetch recipients
-  const fetchRecipients = async (opts?: { dept?: string; keyword?: string }) => {
+  const fetchRecipients = async (opts?: { dept?: string; keyword?: string; asPool?: boolean }) => {
     setLoading(true);
     setMessage("");
     try {
@@ -104,6 +123,8 @@ export default function DrinkMailer() {
       const list: Recipient[] = data.list || [];
       setRecipients(list);
       setAllDepts(data.allDepts || []);
+      // 負責人下拉只在初次（未篩選）載入時建立完整名單，之後套用篩選不影響它
+      if (opts?.asPool) setManagerPool(list);
       // 預設勾選 Active=true 的人
       const nextSel: Record<string, boolean> = {};
       for (const r of list) if (r.email && r.active) nextSel[r.email] = true;
@@ -117,7 +138,7 @@ export default function DrinkMailer() {
   };
 
   useEffect(() => {
-    fetchRecipients();
+    fetchRecipients({ asPool: true });
   }, []);
 
   const filtered = useMemo(() => recipients, [recipients]);
@@ -151,6 +172,10 @@ export default function DrinkMailer() {
       setMessage("請至少勾選一位收件人");
       return;
     }
+    if (!manager) {
+      setMessage("請選擇今日飲料負責人");
+      return;
+    }
     setPendingValues(values);
     setConfirmOpen(true);
   }
@@ -164,19 +189,6 @@ export default function DrinkMailer() {
     setMessage("寄送中…");
 
     try {
-      // 獲取使用者 IP - 改用自建 API (避免被廣告阻擋器攔截)
-      let userIP = "unknown";
-      try {
-        const ipResponse = await fetch('/api/get-ip');
-        if (ipResponse.ok) {
-          const ipData = await ipResponse.json();
-          userIP = ipData.ip || "unknown";
-        }
-      } catch (ipError) {
-        console.warn('獲取 IP 失敗:', ipError);
-        userIP = "fetch-failed";
-      }
-
       const cleanLink = (values.link || "")
         .replace(/[\u200B\uFEFF]/g, "")
         .replace(/\u3000/g, " ")
@@ -189,7 +201,8 @@ export default function DrinkMailer() {
         note: values.note || "",
         emails: Object.keys(selected).filter((k) => selected[k]),
         bccMode,
-        senderIP: userIP,  // 加入 IP
+        managerName: manager?.name || "",   // 今日飲料負責人姓名（信件只顯示這個）
+        managerPhone: manager?.phone || "", // 負責人電話（僅供後端寫進 Logs，不進信件）
         timestamp: new Date().toISOString()
       };
 
@@ -275,6 +288,38 @@ export default function DrinkMailer() {
               <Label>訂購截止 *</Label>
               <DateTimePicker value={deadline} onChange={(d) => setValue("deadline", d as Date, { shouldValidate: true })} />
               {errors.deadline && <p className="text-sm text-red-600">{errors.deadline.message as string}</p>}
+            </div>
+
+            <div className="space-y-2">
+              <Label>今日飲料負責人 *</Label>
+              <Select
+                value={managerEmail || MANAGER_NONE_VALUE}
+                onValueChange={(v) => setManagerEmail(v === MANAGER_NONE_VALUE ? "" : v)}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="選擇負責人" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={MANAGER_NONE_VALUE}>未指定</SelectItem>
+                  {managerOptions.map((r) => (
+                    <SelectItem key={r.email} value={r.email}>
+                      {r.name}{r.dept ? `（${r.dept}）` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {manager ? (
+                <p className="text-sm text-muted-foreground">
+                  聯絡電話：
+                  <span className="font-mono font-medium text-foreground">{manager.phone}</span>
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  {managerOptions.length === 0
+                    ? "名單中尚無電話資料：請先在 Recipients 表填好 Phone 欄並重新部署後端。"
+                    : "必填：請選擇負責人；選後會帶出電話供結單填寫，通知信只顯示姓名、不外洩電話。"}
+                </p>
+              )}
             </div>
 
             <div className="space-y-2 md:col-span-2">
@@ -384,6 +429,10 @@ export default function DrinkMailer() {
                 <div>即將發送給 <b>{deptSummary.total}</b> 位收件人：</div>
                 <div className="p-2 bg-slate-100 rounded text-slate-700 text-sm">
                   {deptSummary.text}
+                </div>
+                <div>
+                  今日飲料負責人：<b>{manager ? manager.name : "（未指定）"}</b>
+                  {manager?.phone ? `（${manager.phone}）` : ""}
                 </div>
                 <div>確定要執行嗎？</div>
               </div>
